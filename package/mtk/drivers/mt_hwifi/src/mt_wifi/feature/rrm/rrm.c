@@ -747,13 +747,12 @@ VOID RRM_PeerNeighborReqAction(
 	} else {
 		if (RRM_PeerNeighborReqSanity(pAd, Elem->Msg, Elem->MsgLen, &DialogToken, &pSsid, &SsidLen)) {
 			MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_INFO, "DialogToken=%x\n", DialogToken);
-			ret = snprintf(ssidbuf, sizeof(ssidbuf), "%s", pSsid);
+			ret = snprintf(ssidbuf, sizeof(ssidbuf), "%.*s", SsidLen, pSsid);
 			if (os_snprintf_error(sizeof(ssidbuf), ret)) {
 				MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_ERROR,
 						"snprintf error!\n");
 				return;
 			}
-			ssidbuf[SsidLen] = '\0';
 			MTWF_DBG(pAd, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_INFO, "pSsid=%s\n", ssidbuf);
 			MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_INFO, "SsidLen=%d\n", SsidLen);
 			RRM_EnqueueNeighborRep(pAd, pEntry, DialogToken, pSsid, SsidLen);
@@ -2538,13 +2537,12 @@ VOID RRM_PeerMeasureReqAction(
 		ScanTab = get_scan_tab_by_wdev(pAd, wdev);
 		if (!ScanTab)
 			return;
-		ret = snprintf(ssidbuf, sizeof(ssidbuf), "%s", pSsid);
+		ret = snprintf(ssidbuf, sizeof(ssidbuf), "%.*s", SsidLen, pSsid);
 		if (os_snprintf_error(sizeof(ssidbuf), ret)) {
 			MTWF_DBG(pAd, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_ERROR,
 					"snprintf error!\n");
 			return;
 		}
-		ssidbuf[SsidLen] = '\0';
 		MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_NOTICE, "pSsid=%s\n", ssidbuf);
 		MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_RRM, DBG_LVL_NOTICE, "SsidLen=%d\n", SsidLen);
 
