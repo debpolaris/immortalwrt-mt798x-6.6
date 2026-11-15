@@ -1,0 +1,141 @@
+From 56e78d36b52413b55c02972bea51fef8f23785f1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Uwe=20Kleine-K=C3=B6nig?= <u.kleine-koenig@baylibre.com>
+Date: Mon, 28 Jul 2025 18:00:17 +0200
+Subject: [PATCH] pwm: mediatek: Handle hardware enable and clock enable
+ separately
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 704d918341c378c5f9505dfdf32d315e256d3846 upstream.
+
+Stop handling the clocks in pwm_mediatek_enable() and
+pwm_mediatek_disable(). This is a preparing change for the next commit
+that requires that clocks and the enable bit are handled separately.
+
+Also move these two functions a bit further up in the source file to
+make them usable in pwm_mediatek_config(), which is needed in the next
+commit, too.
+
+Signed-off-by: Uwe Kleine-König <u.kleine-koenig@baylibre.com>
+Reviewed-by: AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+Link: https://lore.kernel.org/r/55c94fe2917ece152ee1e998f4675642a7716f13.1753717973.git.u.kleine-koenig@baylibre.com
+Cc: stable@vger.kernel.org
+Signed-off-by: Uwe Kleine-König <ukleinek@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+Backport note (H5000M rebase-v2, 2/3):
+- Source: linux-6.6.y stable 070236488cc9, second prerequisite of the
+  duty/period fix chain. Requires 999-2137 (ad9d4db5a8ac) first.
+- Rebased onto the FULL downstream pwm-mediatek chain (806-mt7988,
+  999-2133-longer-period, 999-2135-mt7987, 999-2136-hw-breathing-light).
+  The canonical stable patch applies on that base only with fuzz 1 on
+  hunk #1; this rebased version carries exact context (zero fuzz).
+- Placement adaptation: 999-2136 inserts pwm_bl_set_thres() and
+  pwm_config_bl_thres() between pwm_mediatek_writel() and
+  pwm_mediatek_config(). The moved pwm_mediatek_enable/disable() are
+  therefore inserted after those breathing-light helpers, immediately
+  before pwm_mediatek_config(), preserving the upstream intent (defined
+  before config, usable from it).
+- No functional deviation from the stable commit.
+- Apply order: 999-2137 -> 999-2138 -> 999-2139 (this patch is 999-2138).
+---
+ drivers/pwm/pwm-mediatek.c | 60 ++++++++++++++++++--------------------
+ 1 file changed, 28 insertions(+), 32 deletions(-)
+
+diff --git a/drivers/pwm/pwm-mediatek.c b/drivers/pwm/pwm-mediatek.c
+index 0432f2e..ea68165 100644
+--- a/drivers/pwm/pwm-mediatek.c
++++ b/drivers/pwm/pwm-mediatek.c
+@@ -209,6 +209,26 @@ static inline int pwm_config_bl_thres(struct pwm_mediatek_chip *chip, int pwm,
+ 	return 0;
+ }
+ 
++static void pwm_mediatek_enable(struct pwm_chip *chip, struct pwm_device *pwm)
++{
++	struct pwm_mediatek_chip *pc = to_pwm_mediatek_chip(chip);
++	u32 value;
++
++	value = readl(pc->regs);
++	value |= BIT(pwm->hwpwm);
++	writel(value, pc->regs);
++}
++
++static void pwm_mediatek_disable(struct pwm_chip *chip, struct pwm_device *pwm)
++{
++	struct pwm_mediatek_chip *pc = to_pwm_mediatek_chip(chip);
++	u32 value;
++
++	value = readl(pc->regs);
++	value &= ~BIT(pwm->hwpwm);
++	writel(value, pc->regs);
++}
++
+ static int pwm_mediatek_config(struct pwm_chip *chip, struct pwm_device *pwm,
+ 			       int duty_ns, int period_ns)
+ {
+@@ -314,35 +334,6 @@ out:
+ 	return ret;
+ }
+ 
+-static int pwm_mediatek_enable(struct pwm_chip *chip, struct pwm_device *pwm)
+-{
+-	struct pwm_mediatek_chip *pc = to_pwm_mediatek_chip(chip);
+-	u32 value;
+-	int ret;
+-
+-	ret = pwm_mediatek_clk_enable(chip, pwm);
+-	if (ret < 0)
+-		return ret;
+-
+-	value = readl(pc->regs);
+-	value |= BIT(pwm->hwpwm);
+-	writel(value, pc->regs);
+-
+-	return 0;
+-}
+-
+-static void pwm_mediatek_disable(struct pwm_chip *chip, struct pwm_device *pwm)
+-{
+-	struct pwm_mediatek_chip *pc = to_pwm_mediatek_chip(chip);
+-	u32 value;
+-
+-	value = readl(pc->regs);
+-	value &= ~BIT(pwm->hwpwm);
+-	writel(value, pc->regs);
+-
+-	pwm_mediatek_clk_disable(chip, pwm);
+-}
+-
+ static int pwm_mediatek_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 			      const struct pwm_state *state)
+ {
+@@ -352,8 +343,10 @@ static int pwm_mediatek_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 		return -EINVAL;
+ 
+ 	if (!state->enabled) {
+-		if (pwm->state.enabled)
++		if (pwm->state.enabled) {
+ 			pwm_mediatek_disable(chip, pwm);
++			pwm_mediatek_clk_disable(chip, pwm);
++		}
+ 
+ 		return 0;
+ 	}
+@@ -362,8 +355,11 @@ static int pwm_mediatek_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 	if (err)
+ 		return err;
+ 
+-	if (!pwm->state.enabled)
+-		err = pwm_mediatek_enable(chip, pwm);
++	if (!pwm->state.enabled) {
++		err = pwm_mediatek_clk_enable(chip, pwm);
++		if (!err)
++			pwm_mediatek_enable(chip, pwm);
++	}
+ 
+ 	return err;
+ }
+-- 
+2.52.0.windows.1
+
