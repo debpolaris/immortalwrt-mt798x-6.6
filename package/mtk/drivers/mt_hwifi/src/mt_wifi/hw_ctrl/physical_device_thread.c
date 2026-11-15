@@ -433,24 +433,33 @@ void physical_device_thread_queue_clear_by_mac_ad(
 {
 	PLIST_HEADER data_list;
 	RT_LIST_ENTRY *data_item = NULL;
+	RT_LIST_ENTRY *next_item = NULL;
 	struct physical_device *ph_dev;
 	struct physical_thread_data_item *data;
 
 	if (mac_ad) {
 		ph_dev = mac_ad->physical_dev;
 		data_list = &ph_dev->pd_thread_data_list;
-		data_item = data_list->pHead;
 
+		/*
+		 * Walk the queue through pNext while holding the data lock and
+		 * unlink each matching entry with delEntryList(). The old code
+		 * re-read data_list->pHead on every iteration without advancing,
+		 * so a non-matching head spun forever, and the unlocked head
+		 * dereference raced the consumer thread (use-after-free).
+		 */
+		OS_SEM_LOCK(&ph_dev->pd_thread_data_lock);
+		data_item = data_list->pHead;
 		while (data_item != NULL) {
+			next_item = data_item->pNext;
 			data = (struct physical_thread_data_item *)data_item;
 			if (data->mac_ad == mac_ad) {
-				OS_SEM_LOCK(&ph_dev->pd_thread_data_lock);
-				removeHeadList(data_list);
-				OS_SEM_UNLOCK(&ph_dev->pd_thread_data_lock);
+				delEntryList(data_list, data_item);
 				os_free_mem(data_item);
 			}
-			data_item = data_list->pHead;
+			data_item = next_item;
 		}
+		OS_SEM_UNLOCK(&ph_dev->pd_thread_data_lock);
 	}
 }
 
@@ -466,24 +475,33 @@ void physical_device_thread_queue_clear_by_wdev(
 {
 	PLIST_HEADER data_list;
 	RT_LIST_ENTRY *data_item = NULL;
+	RT_LIST_ENTRY *next_item = NULL;
 	struct physical_device *ph_dev;
 	struct physical_thread_data_item *data;
 
 	if (mac_ad && wdev) {
 		ph_dev = mac_ad->physical_dev;
 		data_list = &ph_dev->pd_thread_data_list;
-		data_item = data_list->pHead;
 
+		/*
+		 * Walk the queue through pNext while holding the data lock and
+		 * unlink each matching entry with delEntryList(). The old code
+		 * re-read data_list->pHead on every iteration without advancing,
+		 * so a non-matching head spun forever, and the unlocked head
+		 * dereference raced the consumer thread (use-after-free).
+		 */
+		OS_SEM_LOCK(&ph_dev->pd_thread_data_lock);
+		data_item = data_list->pHead;
 		while (data_item != NULL) {
+			next_item = data_item->pNext;
 			data = (struct physical_thread_data_item *)data_item;
 			if (data->wdev == wdev) {
-				OS_SEM_LOCK(&ph_dev->pd_thread_data_lock);
-				removeHeadList(data_list);
-				OS_SEM_UNLOCK(&ph_dev->pd_thread_data_lock);
+				delEntryList(data_list, data_item);
 				os_free_mem(data_item);
 			}
-			data_item = data_list->pHead;
+			data_item = next_item;
 		}
+		OS_SEM_UNLOCK(&ph_dev->pd_thread_data_lock);
 	}
 }
 
