@@ -1,0 +1,51 @@
+#!/bin/sh
+# Re-apply the WAN session MTU after every wwan interface up/link/update.
+#
+# Why: the MTK qmi_wwan_q driver takes the session netdev MTU from the QMI
+# bearer indication (1432) and restores it on every re-negotiation, but the
+# modem actually delivers IP packets of up to 1500 bytes (observed 1440, 1456
+# and 1460). The driver's RX path then discards them:
+#   "net wwan0: drop skb_len=5b0 larger than mtu=1432"   (1456-byte packets)
+#   "net wwan0: drop skb_len=5b4 larger than mtu=1456"   (1460-byte packets)
+# Aligning the host-side session MTU with the bearer's real size removes the
+# drops. This is host-side only - the modem is not touched.
+#
+# Rollback: ip link set dev wwan0_1 mtu 1432
+
+case "${ACTION}" in
+	ifup | ifupdate | iflink) ;;
+	*) exit 0 ;;
+esac
+
+echo "${DEVICE}" | grep -q -e "wwan" || exit 0
+
+i=0
+while [ "${i}" -lt 15 ]; do
+	[ -e /sys/class/net/wwan0_1 ] && break
+	sleep 1
+	i=$((i + 1))
+done
+[ -e /sys/class/net/wwan0_1 ] || exit 0
+
+apply_mtu() {
+	[ "$(cat /sys/class/net/wwan0_1/mtu 2>/dev/null)" = "1500" ] && return 0
+	/sbin/ip link set dev wwan0_1 mtu 1500
+	logger -t hotplug "WWAN session MTU set to 1500 (modem delivers up to 1500-byte IP packets)."
+}
+
+apply_mtu
+
+# The driver can apply the bearer MTU after this hook runs, which would
+# silently undo the fix. Re-check briefly and re-apply if it does.
+# Backgrounded so the hotplug call itself is never delayed. Output is
+# redirected because netifd reads this script's stdout: an inherited pipe
+# would keep it open until the loop ends.
+(
+	j=0
+	while [ "${j}" -lt 10 ]; do
+		sleep 3
+		[ -e /sys/class/net/wwan0_1 ] || exit 0
+		apply_mtu
+		j=$((j + 1))
+	done
+) >/dev/null 2>&1 &

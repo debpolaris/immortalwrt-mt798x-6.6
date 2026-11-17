@@ -217,7 +217,7 @@ mediatek_setup_interfaces()
 		;;
 	hiveton,h5000m|\
 	mediatek,mt7987*)
-		ucidef_set_interfaces_lan_wan "eth0 hnat" eth1
+		ucidef_set_interface_lan "eth0 hnat eth1"
 		;;
 	mercusys,mr90x-v1|\
 	mercusys,mr90x-v1-ubi)

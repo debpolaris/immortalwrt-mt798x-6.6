@@ -1,0 +1,22 @@
+#!/bin/sh
+# H5000M install default: both wired ports are LAN (board.d puts eth0/hnat/eth1
+# in br-lan). The real WAN is the 5G modem (network.USB / USBv6, created by
+# QModem at dial time). Point the firewall wan zone at the modem so it gets
+# NAT'd, and drop any physical eth1 wan/wan6 interface. Replicates the known-good
+# fresh-setup network state at first boot.
+i=0
+while [ "$i" -lt 16 ]; do
+	z=$(uci -q get "firewall.@zone[$i].name")
+	[ -z "$z" ] && break
+	if [ "$z" = "wan" ]; then
+		uci -q delete "firewall.@zone[$i].network"
+		uci add_list "firewall.@zone[$i].network=USB"
+		uci add_list "firewall.@zone[$i].network=USBv6"
+	fi
+	i=$((i + 1))
+done
+uci -q delete network.wan
+uci -q delete network.wan6
+uci -q commit firewall
+uci -q commit network
+exit 0

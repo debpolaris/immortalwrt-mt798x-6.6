@@ -1,0 +1,17 @@
+#!/bin/sh
+# H5000M install default: UTC timezone + non-CN NTP servers.
+# ImmortalWrt's default-settings-chn (99-default-settings-chinese) forces
+# CST-8 / Asia/Shanghai + tencent/aliyun NTP at first boot. This script sorts
+# after it (zzz > 99) so UTC wins even if that package is still present.
+# zoneinfo DB is not installed; musl uses the POSIX /etc/TZ string ('UTC' is valid).
+
+uci -q batch <<'EOF'
+set system.@system[0].zonename='UTC'
+set system.@system[0].timezone='UTC'
+delete system.ntp.server
+add_list system.ntp.server='time.cloudflare.com'
+add_list system.ntp.server='kr.pool.ntp.org'
+commit system
+EOF
+
+exit 0

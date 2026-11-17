@@ -1,0 +1,43 @@
+# WAN MSS clamp for the cellular session — see HANDOFF.md §3.6 (구 docs/무선-재부팅-장애-진단.md §3.15, 아카이브: backup_firmware/archive/pre-simplify-20261114.tar.gz)
+#
+# Why:
+#   fw4's own mtu_fix rule (firewall zone "wan") clamps the TCP MSS to `rt mtu`,
+#   i.e. the interface MTU (1432).  An MSS is the TCP *payload* size, so an MSS
+#   of 1432 produces IP packets of 1432 + 20 (IPv4) + 20 (TCP) = 1472 bytes,
+#   which does not fit the session MTU.  The modem then delivers 1456-byte IP
+#   packets and the MTK qmi_wwan_q receive path discards them:
+#       net wwan0: drop skb_len=5b0 larger than mtu=1432
+#
+#   1380 / 1360 = session MTU 1432 - 52 (IPv4 + TCP w/ timestamps)
+#                        1432 - 72 (IPv6 + TCP w/ timestamps)
+#   -> server IP packets become 1420 bytes, below both the session MTU and the
+#      modem's own IP MTU (1456), so nothing is fragmented and nothing is dropped.
+#
+# Deployment:
+#   - installed as /etc/nftables.d/20-wwan-mss-clamp.nft (fw4 includes every
+#     *.nft in that directory inside the inet/fw4 table)
+#   - separate base chains with priority -120, i.e. AFTER fw4's mangle chains
+#     (-150) and BEFORE NAT (dstnat -100 / srcnat 100).  fw4's include sits
+#     before its own chain definitions, so rules appended to fw4's own chains
+#     would be evaluated *before* fw4's mtu_fix rule and lose to it; a
+#     dedicated chain with a later priority guarantees our value is applied last.
+#   - counters on every rule: `nft list chain inet fw4 user_mss_clamp_postrouting`
+#
+# Rollback:
+#   rm /etc/nftables.d/20-wwan-mss-clamp.nft && fw4 reload
+#
+# Effective scope: the MSS option only travels in SYN packets, so the clamp
+# applies to NEW TCP connections; existing connections keep their negotiated
+# MSS until they are re-established.
+
+chain user_mss_clamp_forward {
+	type filter hook forward priority -120; policy accept;
+	iifname "wwan0_1" meta nfproto ipv4 tcp flags syn / syn,fin,rst counter tcp option maxseg size set 1380 comment "user: WAN ingress MSS clamp IPv4"
+	iifname "wwan0_1" meta nfproto ipv6 tcp flags syn / syn,fin,rst counter tcp option maxseg size set 1360 comment "user: WAN ingress MSS clamp IPv6"
+}
+
+chain user_mss_clamp_postrouting {
+	type filter hook postrouting priority -120; policy accept;
+	oifname "wwan0_1" meta nfproto ipv4 tcp flags syn / syn,fin,rst counter tcp option maxseg size set 1380 comment "user: WAN egress MSS clamp IPv4"
+	oifname "wwan0_1" meta nfproto ipv6 tcp flags syn / syn,fin,rst counter tcp option maxseg size set 1360 comment "user: WAN egress MSS clamp IPv6"
+}

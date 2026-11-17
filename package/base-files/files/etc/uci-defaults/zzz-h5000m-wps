@@ -1,0 +1,111 @@
+#!/bin/sh
+# H5000M install default: repurpose the wps button as an eth1 LAN<->WAN toggle.
+# The vendor luci-app-Airpifanctrl ships /etc/rc.button/wps (WPS-PBC + fan-boost).
+# Writing the handler here at first boot overrides it in the overlay without a
+# build-time package file conflict. Fan control stays available via LuCI.
+# reset button is untouched. Long-press >=3s toggles; see handler for debounce,
+# state detection, LED (white:wan) blink and DRY_RUN mode.
+cat > /etc/rc.button/wps <<'WPSHANDLER'
+#!/bin/sh
+# H5000M wps button -> eth1 LAN<->WAN toggle.
+# Repurposed from the vendor fan-boost handler. reset button is untouched.
+#
+# Trigger : long-press >=3s (SEEN>=3 on released). Short press ignored.
+# Debounce: hardware 10ms (DTS) + software 8s cooldown lock.
+# State   : eth1 present in br-lan bridge => LAN mode, else WAN mode.
+# LED     : blink white:wan (the eth1 port LED) 3x during toggle, then restore
+#           its netdev trigger. WLAN LEDs (wlan-0/1) are left alone.
+# Action  : call the proven /usr/bin/eth1-{lan,wan}.sh (auto-rollback on verify
+#           fail). network reload blips ALL LAN (incl. eth0) ~15-25s.
+# DRY_RUN : WPS_DRY_RUN=1 -> detect + debounce + log only; no uci commit, no
+#           network reload, no LED write. Used for safe live logic verification.
+#
+# Invoked by procd button hotplug (sourced): ACTION=pressed|released|timeout,
+# SEEN=hold seconds. Uses `return` (sourced context), never `exit`.
+
+TAG="wps-toggle"
+LOCK="/tmp/.wps-toggle.lock"
+LOGDIR="/root/h5000m-wps"
+COOLDOWN=8
+THRESHOLD=3
+LED="/sys/class/leds/white:wan"
+DRY="${WPS_DRY_RUN:-0}"
+
+log() {
+	logger -t "$TAG" "$*"
+	mkdir -p "$LOGDIR" 2>/dev/null
+	echo "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date) $*" >> "$LOGDIR/toggle.log"
+}
+
+now=$(date +%s)
+if [ -f "$LOCK" ]; then
+	last=$(cat "$LOCK" 2>/dev/null || echo 0)
+	if [ $((now - last)) -lt "$COOLDOWN" ]; then
+		log "IGNORE cooldown ($((now - last))s < ${COOLDOWN}s)"
+		return 0
+	fi
+fi
+
+case "$ACTION" in
+pressed)
+	# arm a 3s timeout; the toggle itself fires on released (SEEN>=3)
+	return 3
+	;;
+released)
+	if [ "${SEEN:-0}" -lt "$THRESHOLD" ]; then
+		log "IGNORE short press (SEEN=${SEEN:-0}s < ${THRESHOLD}s)"
+		return 0
+	fi
+	;;
+*)
+	return 0
+	;;
+esac
+
+# state detection from the live bridge membership
+if [ -e /sys/class/net/br-lan/brif/eth1 ]; then
+	CUR="LAN"; TARGET="WAN"; SCRIPT="/usr/bin/eth1-wan.sh"
+else
+	CUR="WAN"; TARGET="LAN"; SCRIPT="/usr/bin/eth1-lan.sh"
+fi
+
+if [ "$DRY" = "1" ]; then
+	log "DRY_RUN eth1 current=$CUR would-toggle-to=$TARGET via=$SCRIPT SEEN=${SEEN}s (no config change)"
+	echo "$now" > "$LOCK"
+	return 0
+fi
+
+echo "$now" > "$LOCK"
+log "TOGGLE eth1 $CUR -> $TARGET (SEEN=${SEEN}s)"
+
+# LED blink in background so the handler is not blocked; restore trigger after.
+if [ -d "$LED" ]; then
+	(
+		old_trig=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$LED/trigger" 2>/dev/null)
+		old_dev=$(cat "$LED/device_name" 2>/dev/null)
+		echo none > "$LED/trigger" 2>/dev/null
+		i=0
+		while [ "$i" -lt 3 ]; do
+			echo 1 > "$LED/brightness" 2>/dev/null; sleep 1
+			echo 0 > "$LED/brightness" 2>/dev/null; sleep 1
+			i=$((i + 1))
+		done
+		if [ "$old_trig" = "netdev" ] && [ -n "$old_dev" ]; then
+			echo netdev > "$LED/trigger" 2>/dev/null
+			echo "$old_dev" > "$LED/device_name" 2>/dev/null
+		else
+			echo "${old_trig:-none}" > "$LED/trigger" 2>/dev/null
+		fi
+	) >/dev/null 2>&1 &
+fi
+
+if [ -x "$SCRIPT" ]; then
+	"$SCRIPT"
+	log "DISPATCHED $SCRIPT (reload blips LAN ~15-25s; auto-rollback on verify fail)"
+else
+	log "ERROR $SCRIPT not found/executable"
+fi
+return 0
+WPSHANDLER
+chmod 755 /etc/rc.button/wps
+exit 0
