@@ -1,29 +1,41 @@
 #!/bin/sh
-# H5000M install default: repurpose the wps button as an eth1 LAN<->WAN toggle.
-# The vendor luci-app-Airpifanctrl ships /etc/rc.button/wps (WPS-PBC + fan-boost).
-# Writing the handler here at first boot overrides it in the overlay without a
-# build-time package file conflict. Fan control stays available via LuCI.
-# reset button is untouched. Long-press >=3s toggles; see handler for debounce,
-# state detection, LED (white:wan) blink and DRY_RUN mode.
-cat > /etc/rc.button/wps <<'WPSHANDLER'
-#!/bin/sh
-# H5000M wps button -> eth1 LAN<->WAN toggle.
-# Repurposed from the vendor fan-boost handler. reset button is untouched.
+# H5000M install default (uci-defaults, first boot): wps button coexistence handler.
 #
-# Trigger : long-press >=3s (SEEN>=3 on released). Short press ignored.
-# Debounce: hardware 10ms (DTS) + software 8s cooldown lock.
-# State   : eth1 present in br-lan bridge => LAN mode, else WAN mode.
-# LED     : blink white:wan (the eth1 port LED) 3x during toggle, then restore
-#           its netdev trigger. WLAN LEDs (wlan-0/1) are left alone.
-# Action  : call the proven /usr/bin/eth1-{lan,wan}.sh (auto-rollback on verify
-#           fail). network reload blips ALL LAN (incl. eth0) ~15-25s.
-# DRY_RUN : WPS_DRY_RUN=1 -> detect + debounce + log only; no uci commit, no
-#           network reload, no LED write. Used for safe live logic verification.
+# Defect fixed 2026-11-18: the previous bake wrote ONLY /etc/rc.button/wps, but
+# S99Airpifanctrl does `cp /usr/bin/wps /etc/rc.button/wps` on every start/restart,
+# clobbering the override with the vendor fan handler each boot. Fix: install the
+# handler at the SOURCE /usr/bin/wps (what Airpifanctrl copies) so it propagates on
+# every boot, and seed /etc/rc.button/wps too. The real fan daemon /usr/bin/fancts.sh
+# and LuCI fan control are untouched; only the button shortcut is repurposed.
+#
+# Coexistence: SHORT press (released SEEN<3) = vendor fan-boost toggle (max<->smart);
+# LONG press (released SEEN>=3) = eth1 LAN<->WAN toggle via /usr/bin/eth1-{lan,wan}.sh
+# (8s cooldown, white:wan LED blink, auto-rollback). reset button untouched.
+# No secrets baked (config/logic only).
+cat > /usr/bin/wps <<'WPSHANDLER'
+#!/bin/sh
+# H5000M wps button — coexistence handler (2026-11-18 defect fix).
+#   SHORT press (released SEEN<3)  : vendor fan-boost toggle (max cooling <-> smart).
+#   LONG  press (released SEEN>=3) : eth1 LAN<->WAN toggle (proven eth1-{lan,wan}.sh).
+#
+# Why this file lives at /usr/bin/wps: S99Airpifanctrl does
+#   cp /usr/bin/wps /etc/rc.button/wps
+# on every start/restart, which clobbered the old uci-defaults-only override.
+# Installing the handler at the SOURCE (/usr/bin/wps) makes Airpifanctrl propagate
+# it on every boot. The real fan daemon /usr/bin/fancts.sh and LuCI fan control are
+# untouched; only the button shortcut is repurposed. reset button is untouched.
+#
+# Fan-boost toggle has NO cooldown so rapid short presses work (boost <-> normal),
+# matching the vendor behaviour. The eth1 toggle keeps an 8s cooldown because a
+# network reload blips ALL LAN (incl. eth0) ~15-25s.
 #
 # Invoked by procd button hotplug (sourced): ACTION=pressed|released|timeout,
-# SEEN=hold seconds. Uses `return` (sourced context), never `exit`.
+# SEEN=hold seconds (proven delivered by /etc/rc.button/reset on this firmware).
+# Uses `return` (sourced context), never `exit`.
+# WPS_DRY_RUN=1 => log only; no fan curl, no uci/reload, no LED write.
 
 TAG="wps-toggle"
+FANCONF="/tmp/wpsbt.conf"
 LOCK="/tmp/.wps-toggle.lock"
 LOGDIR="/root/h5000m-wps"
 COOLDOWN=8
@@ -37,23 +49,37 @@ log() {
 	echo "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date) $*" >> "$LOGDIR/toggle.log"
 }
 
-now=$(date +%s)
-if [ -f "$LOCK" ]; then
-	last=$(cat "$LOCK" 2>/dev/null || echo 0)
-	if [ $((now - last)) -lt "$COOLDOWN" ]; then
-		log "IGNORE cooldown ($((now - last))s < ${COOLDOWN}s)"
-		return 0
+fan_boost() {
+	ts=$(date +%s)
+	if [ ! -f "$FANCONF" ]; then
+		if [ "$DRY" = "1" ]; then
+			log "DRY_RUN short press -> would fan-boost ON (max cooling); no change"
+			return 0
+		fi
+		touch "$FANCONF"
+		curl -s --max-time 3 "http://127.0.0.1/cgi-bin/luci/admin/fancontrol/fanst3?set=fanst3&p=1&ts=$ts"
+		echo "팬 부스트 켜짐 (최대 냉각)" > /tmp/lucimsg.file
+		log "FAN boost ON (short press, max cooling)"
+	else
+		if [ "$DRY" = "1" ]; then
+			log "DRY_RUN short press -> would fan-boost OFF (smart); no change"
+			return 0
+		fi
+		rm -f "$FANCONF"
+		curl -s --max-time 3 "http://127.0.0.1/cgi-bin/luci/admin/fancontrol/fanst4?set=fanst4&p=1&ts=$ts"
+		echo "팬 부스트 꺼짐 (스마트 모드)" > /tmp/lucimsg.file
+		log "FAN boost OFF (short press, smart mode)"
 	fi
-fi
+}
 
+now=$(date +%s)
 case "$ACTION" in
 pressed)
-	# arm a 3s timeout; the toggle itself fires on released (SEEN>=3)
-	return 3
+	return 0
 	;;
 released)
 	if [ "${SEEN:-0}" -lt "$THRESHOLD" ]; then
-		log "IGNORE short press (SEEN=${SEEN:-0}s < ${THRESHOLD}s)"
+		fan_boost
 		return 0
 	fi
 	;;
@@ -62,7 +88,15 @@ released)
 	;;
 esac
 
-# state detection from the live bridge membership
+# ---- long press >=3s: eth1 LAN<->WAN toggle (8s cooldown debounce) ----
+if [ -f "$LOCK" ]; then
+	last=$(cat "$LOCK" 2>/dev/null || echo 0)
+	if [ $((now - last)) -lt "$COOLDOWN" ]; then
+		log "IGNORE cooldown ($((now - last))s < ${COOLDOWN}s)"
+		return 0
+	fi
+fi
+
 if [ -e /sys/class/net/br-lan/brif/eth1 ]; then
 	CUR="LAN"; TARGET="WAN"; SCRIPT="/usr/bin/eth1-wan.sh"
 else
@@ -70,7 +104,7 @@ else
 fi
 
 if [ "$DRY" = "1" ]; then
-	log "DRY_RUN eth1 current=$CUR would-toggle-to=$TARGET via=$SCRIPT SEEN=${SEEN}s (no config change)"
+	log "DRY_RUN long press eth1 current=$CUR would-toggle-to=$TARGET via=$SCRIPT SEEN=${SEEN}s (no config change)"
 	echo "$now" > "$LOCK"
 	return 0
 fi
@@ -107,5 +141,7 @@ else
 fi
 return 0
 WPSHANDLER
+chmod 755 /usr/bin/wps
+cp /usr/bin/wps /etc/rc.button/wps
 chmod 755 /etc/rc.button/wps
 exit 0
